@@ -1,0 +1,15 @@
+LUI   x1, 1000
+AUIPC x2, 2000
+ADD   x3, x1, x2
+SUB   x4, x3, x1
+AND   x5, x3, x4
+OR    x6, x5, x2
+XOR   x7, x6, x1
+SLL   x8, x7, x1
+SRL   x9, x8, x2
+SLT   x10, x9, x3
+LW    x11, 0(x1)
+SW    x11, 4(x1)
+BEQ   x3, x4, 8
+BNE   x5, x6, 12
+JUMP  16

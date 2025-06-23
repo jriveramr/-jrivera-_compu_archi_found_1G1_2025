@@ -1,23 +1,29 @@
 class DataForwarding:
     def __init__(self):
-        # Inicializamos las variables que controlan el adelanto de datos
-        self.forwarding_enabled = True  # Habilitar o deshabilitar el adelanto de datos
+        self.forwarding_enabled = True
 
-    def apply_forwarding(self, instruction, registers, ex_mem, mem_wb):
-        """
-        Aplica el adelanto de datos si es necesario.
-        :param instruction: Instrucción que está siendo ejecutada
-        :param registers: Registros del procesador
-        :param ex_mem: Registro EX/MEM con los datos de la etapa anterior
-        :param mem_wb: Registro MEM/WB con los datos de la etapa de writeback
-        :return: Valor de registro actualizado (si es necesario)
-        """
-        if ex_mem and instruction['rs1'] == ex_mem['rd']:
-            instruction['rs1'] = ex_mem['alu_result']
-        if ex_mem and instruction['rs2'] == ex_mem['rd']:
-            instruction['rs2'] = ex_mem['alu_result']
-        if mem_wb and instruction['rs1'] == mem_wb['rd']:
-            instruction['rs1'] = mem_wb['alu_result']
-        if mem_wb and instruction['rs2'] == mem_wb['rd']:
-            instruction['rs2'] = mem_wb['alu_result']
-        return instruction
+    def apply_forwarding(self, instr, registers, ex_mem, mem_wb):
+        # Prepara valores default
+        val1 = None
+        val2 = None
+
+        # EX→ID forwarding
+        if self.forwarding_enabled and ex_mem:
+            if instr.get('rs1') == ex_mem.get('rd'):
+                val1 = ex_mem['alu_result']
+            if instr.get('rs2') == ex_mem.get('rd'):
+                val2 = ex_mem['alu_result']
+
+        # MEM→ID forwarding
+        if self.forwarding_enabled and mem_wb:
+            if instr.get('rs1') == mem_wb.get('rd'):
+                val1 = mem_wb['alu_result'] if mem_wb.get('alu_result') is not None else mem_wb.get('mem_data')
+            if instr.get('rs2') == mem_wb.get('rd'):
+                val2 = mem_wb['alu_result'] if mem_wb.get('alu_result') is not None else mem_wb.get('mem_data')
+
+        # Guarda flags y valores forwarded
+        instr['_forwarded'] = (val1 is not None) or (val2 is not None)
+        if val1 is not None: instr['val1'] = val1
+        if val2 is not None: instr['val2'] = val2
+
+        return instr
