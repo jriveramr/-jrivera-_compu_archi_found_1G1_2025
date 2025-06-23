@@ -214,7 +214,7 @@ class PipelineView(tk.Tk):
         pred   = (v in (3,4))
         self.regs     = Registers()
         self.mem      = Memory(size=1024)
-        self.pipeline = Pipeline(hazard_unit=hazard, branch_predictor=pred)
+        self.pipeline = Pipeline(hazard_unit=hazard, branch_pred=pred)
         self.pipeline.stats = ExecutionStatistics()
         self.pipeline.registers = self.regs
         self.pipeline.memory    = self.mem
