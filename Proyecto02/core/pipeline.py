@@ -56,274 +56,331 @@ class Pipeline:
         self.flush_next = False    # flag para vaciar IF/ID
 
     def execute_stage(self):
-    # Si hay que flush–ear (control hazard)…
-        if self.flush_next:
-            print(f"[Cycle {self.cycle_count}] Flush inserted (control hazard)")
-            self.fetch_decode   = None
-            self.decode_execute = None
-            self.current_stage  = None
-            self.flush_next     = False
-            self.cycle_count   += 1
-            return
-        
-        # IF→ID→EX→MEM→WB condicionados por hazard_unit
-        self.fetch()
-        self.decode()
-        self.execute()
-        self.memory_access()
+        """
+        Realiza un ciclo completo del pipeline:
+        - writeback de la etapa anterior
+        - memory access
+        - execute
+        - decode
+        - fetch
+        """
+        # 1) WB
+        self.current_stage = 'WB'
         self.writeback()
+
+        # 2) MEM
+        self.current_stage = 'MEM'
+        self.memory_access()
+
+        # 3) EX
+        self.current_stage = 'EX'
+        self.execute()
+
+        # 4) ID
+        self.current_stage = 'ID'
+        self.decode()
+
+        # 5) IF
+        self.current_stage = 'IF'
+        self.fetch()
+
+        # Contar este ciclo
         self.cycle_count += 1
 
-        # Si no, el ciclo normal
-        if not self.stall:
-            self.fetch()
-            self.decode()
-            self.execute()
-            self.memory_access()
-            self.writeback()
-        else:
-            print(f"[Cycle {self.cycle_count}] Stall inserted")
-            self.stall = False
+        # Para debug consola
+        print(f"--- End of Cycle {self.cycle_count} (current_stage={self.current_stage}) ---")
 
-        self.cycle_count += 1
 
     def fetch(self):
         self.current_stage = 'IF'
+        # Si pasamos del final de programa, inyectamos NOP
+        if self.pc is None or self.pc >= getattr(self, 'program_end', float('inf')):
+            self.fetch_decode = None
+            return
+
         idx = self.pc // 4
-        raw = self.memory.load(idx)
-        self.fetch_decode = f"{raw:032b}"
-        print(f"[Cycle {self.cycle_count}] IF: fetched {self.fetch_decode} from PC={self.pc}")
-        self.pc += 4
+        # Si idx está fuera del rango de la lista, inyectamos NOP
+        if idx < 0 or idx >= len(self.memory.memory):
+            self.fetch_decode = None
+            return
+
+        raw = self.memory.load(idx)  # :contentReference[oaicite:0]{index=0}
+        binstr = f"{raw:032b}"
+        self.fetch_decode = binstr
+        print(f"[Cycle {self.cycle_count}] IF: fetched {binstr} from PC={self.pc}")
 
     def decode(self):
         """
-        Etapa ID: Decodifica la instrucción en IF/ID (self.fetch_decode) y
-        llena el latch self.decode_execute con un dict de campos.
-        También inserta stalls por RAW y aplica forwarding si está habilitado.
+        Etapa ID: decodifica la instrucción que vino de IF, construye self.decode_execute
+        y luego aplica (si procede) detección de data hazards y forwarding.
         """
         self.current_stage = 'ID'
+        raw = self.fetch_decode
 
-        # Si no hay instrucción en IF/ID, inyectamos un NOP y salimos
-        if self.fetch_decode is None:
+        # Si no hay nada (flushed), inyectamos NOP y salimos
+        if raw is None:
             self.decode_execute = None
             return
 
-        b      = self.fetch_decode
-        opcode = int(b[0:6], 2)
+        opcode = int(raw[0:6], 2)
 
-        # -------- Decodificación --------
-        de = {}
-
-        # R-type: ADD, SUB, AND, OR, XOR, SLL, SRL, SLT
+        # Empezamos construyendo el nuevo paquete de ID/EX
+        instr = None
+        # R-type
         if opcode in (
             self.OPCODES['ADD'], self.OPCODES['SUB'],
             self.OPCODES['AND'], self.OPCODES['OR'],
             self.OPCODES['XOR'], self.OPCODES['SLL'],
             self.OPCODES['SRL'], self.OPCODES['SLT']
         ):
-            rd  = int(b[6:11], 2)
-            rs1 = int(b[11:16], 2)
-            rs2 = int(b[16:21], 2)
-            de = {'type':'R',     'opcode':opcode,
-                  'rd':rd,        'rs1':rs1,     'rs2':rs2}
+            rd  = int(raw[6:11], 2)
+            rs1 = int(raw[11:16], 2)
+            rs2 = int(raw[16:21], 2)
+            instr = {'type':'R','opcode':opcode,'rd':rd,'rs1':rs1,'rs2':rs2}
 
-        # I-type LW/LOAD
+        # I-type LW
         elif opcode == self.OPCODES['LW']:
-            rt  = int(b[6:11], 2)
-            rs1 = int(b[11:16], 2)
-            imm = self._sign_extend(b[16:], 16)
-            de = {'type':'I_LW',  'opcode':opcode,
-                  'rt':rt,       'rs1':rs1,     'imm':imm}
+            rt  = int(raw[6:11], 2)
+            rs1 = int(raw[11:16], 2)
+            imm = self._sign_extend(raw[16:], 16)
+            instr = {'type':'I_LW','opcode':opcode,'rt':rt,'rs1':rs1,'imm':imm}
 
-        # S-type SW/STORE
+        # S-type SW
         elif opcode == self.OPCODES['SW']:
-            imm_hi = int(b[6:11], 2)
-            rs1    = int(b[11:16], 2)
-            rt     = int(b[16:21], 2)
-            imm_lo = int(b[21:],   2)
-            imm    = self._sign_extend(f"{imm_hi:05b}{imm_lo:011b}", 16)
-            de = {'type':'S_SW',   'opcode':opcode,
-                  'rt':rt,        'rs1':rs1,     'imm':imm}
+            hi5    = int(raw[6:11], 2)
+            rs1    = int(raw[11:16], 2)
+            rt     = int(raw[16:21], 2)
+            lo11   = int(raw[21:],    2)
+            imm    = self._sign_extend(f"{hi5:05b}{lo11:011b}", 16)
+            instr = {'type':'S_SW','opcode':opcode,'rt':rt,'rs1':rs1,'imm':imm}
 
         # B-type BEQ/BNE
         elif opcode in (self.OPCODES['BEQ'], self.OPCODES['BNE']):
-            rs1 = int(b[6:11], 2)
-            rs2 = int(b[11:16],2)
-            imm = self._sign_extend(b[16:], 16)
-            de = {'type':'B',      'opcode':opcode,
-                  'rs1':rs1,      'rs2':rs2,     'imm':imm}
+            rs1 = int(raw[6:11], 2)
+            rs2 = int(raw[11:16],2)
+            imm = self._sign_extend(raw[16:], 16)
+            instr = {'type':'B','opcode':opcode,'rs1':rs1,'rs2':rs2,'imm':imm}
 
         # J-type JUMP
         elif opcode == self.OPCODES['JUMP']:
-            imm = self._sign_extend(b[6:], 26)
-            de = {'type':'J',      'opcode':opcode,
-                  'imm':imm}
+            imm = self._sign_extend(raw[6:], 26)
+            instr = {'type':'J','opcode':opcode,'imm':imm}
 
         # U-type LUI/AUIPC
         elif opcode in (self.OPCODES['LUI'], self.OPCODES['AUIPC']):
-            rd  = int(b[6:11], 2)
-            imm = int(b[11:],   2) << 11
-            de = {'type':'U',      'opcode':opcode,
-                  'rd':rd,        'imm':imm}
+            rd  = int(raw[6:11], 2)
+            imm = int(raw[11:], 2) << 11
+            instr = {'type':'U','opcode':opcode,'rd':rd,'imm':imm}
 
         else:
-            raise ValueError(f"Opcode desconocido en ID: {opcode:06b}")
+            raise ValueError(f"Opcode desconocido en ID: {opcode}")
 
-        # Guardamos la decodificación
-        self.decode_execute = de.copy()
-        print(f"[Cycle {self.cycle_count}] ID: decoded {self.decode_execute}")
+        # Ya tenemos un diccionario válido
+        self.decode_execute = instr
 
-        # ---- Hazard detection + Forwarding ----
-        if self.hazard_unit and self.decode_execute:
-            # RAW hazard: si rs1 o rs2 coincide con rd de EX/MEM
-            rd_ex = self.ex_mem.get('rd')
-            if (de['type']=='R' and
-                (de['rs1']==rd_ex or de['rs2']==rd_ex)):
+        # Ahora, si hay unidad de hazards, aplicamos detección y forwarding
+        if self.hazard_unit:
+            # RAW detection → posible stall
+            rd_ex = self.ex_mem.get('rd') if self.ex_mem else None
+            if instr['type']=='R' and (instr['rs1']==rd_ex or instr['rs2']==rd_ex):
                 print("  Data hazard → stall next cycle")
                 self.stall = True
             else:
                 self.stall = False
 
-            # Aplicar forwarding
+            # forwarding (DataForwarding debe devolver el mismo dict con campos _forwarded y val1/val2 si aplica)
             self.decode_execute = self.data_forwarding.apply_forwarding(
-                self.decode_execute,
-                self.registers,
-                self.ex_mem,
-                self.mem_wb
+                self.decode_execute, self.registers, self.ex_mem, self.mem_wb
             )
         else:
-            # Sin unidad de riesgos: no stalls, no forwarding
+            # sin unidad de riesgos: ni stall ni forwarding
             self.stall = False
-            if self.decode_execute is not None:
-                self.decode_execute['_forwarded'] = False
+            self.decode_execute['_forwarded'] = False
 
-        # Mostrar resultado final tras forwarding
-        print(f"[Cycle {self.cycle_count}] ID: after hazards/forwarding -> {self.decode_execute}")
+        print(f"[Cycle {self.cycle_count}] ID: decoded {self.decode_execute}")
 
     def execute(self):
+        """
+        Etapa EX:
+         - Calcula el resultado del ALU
+         - Gestiona saltos/branch (control hazards → flush + PC)
+         - Llena el registro ex_mem para la etapa MEM
+        """
         self.current_stage = 'EX'
-        de = self.decode_execute
-        op = de['opcode']
-        res = None
 
-        if de['type'] == 'R':
-            a = de.get('val1', self.registers.read(de['rs1']))
-            b = de.get('val2', self.registers.read(de['rs2']))
-            if   op == self.OPCODES['ADD']: res = a + b
-            elif op == self.OPCODES['SUB']: res = a - b
-            elif op == self.OPCODES['AND']: res = a & b
-            elif op == self.OPCODES['OR']:  res = a | b
-            elif op == self.OPCODES['XOR']: res = a ^ b
-            elif op == self.OPCODES['SLL']: res = (a << b) & 0xFFFFFFFF
-            elif op == self.OPCODES['SRL']: res = (a >> b) & 0xFFFFFFFF
-            elif op == self.OPCODES['SLT']: res = int(a < b)
+        # Si hay stall o no hay instrucción: bubble
+        if getattr(self, 'stall', False) or self.decode_execute is None:
+            self.ex_mem = None
+            return
 
-        elif de['type'] == 'U':
-            res = de['imm']
+        de   = self.decode_execute
+        op   = de['opcode']
+        typ  = de['type']
 
-        elif de['type'] == 'I_LW':
-            res = de['imm'] + self.registers.read(de['rs1'])
+        # Leer operandos (si ya fueron forwardeados, vienen en val1/val2)
+        a = de.get('val1', self.registers.read(de.get('rs1', 0)))
+        b = de.get('val2', self.registers.read(de.get('rs2', 0)))
 
-        elif de['type'] == 'S_SW':
-            res = de['imm'] + self.registers.read(de['rs1'])
+        alu_result   = None
+        branch_taken = False
+        target_pc    = None
 
-        elif de['type']=='B':
-            a = self.registers.read(de['rs1'])
-            b = self.registers.read(de['rs2'])
-            taken = ((op==self.OPCODES['BEQ'] and a==b) or
-                     (op==self.OPCODES['BNE'] and a!=b))
-            # predecimos no-taken:
-            prediction = False
-            if getattr(self, 'forwarding_prediction', None):
-                prediction = self.forwarding_prediction.predict_forwarding(de, self.ex_mem, self.mem_wb)
+        # --- R-type ---
+        if typ == 'R':
+            if   op == self.OPCODES['ADD']: alu_result = a + b
+            elif op == self.OPCODES['SUB']: alu_result = a - b
+            elif op == self.OPCODES['AND']: alu_result = a & b
+            elif op == self.OPCODES['OR' ]: alu_result = a | b
+            elif op == self.OPCODES['XOR']: alu_result = a ^ b
+            elif op == self.OPCODES['SLL']: alu_result = (a << (b & 0x1F)) & 0xFFFFFFFF
+            elif op == self.OPCODES['SRL']: alu_result = (a % (1<<32)) >> (b & 0x1F)
+            elif op == self.OPCODES['SLT']: alu_result = 1 if a < b else 0
 
-            # ajuste real del PC
-            target = self.pc + de['imm']
-            next_pc = self.pc  # this was PC+4 in fetch, pero lo usamos aquí:
-            # if taken, target; else implicit fall-through (current PC)
-            correct_pc = (target if taken else self.pc)
-            if taken and prediction:
-                # predije taken y fue taken → OK
-                self.pc = target
-            elif (not taken) and (not prediction):
-                # predije not-taken y no fue taken → OK
-                # PC ya vale PC+4 (fetch avanzó antes)
-                pass
-            else:
-                # MISPREDICTION
-                self.branch_mispredictions += 1
-                # corregimos PC al correcto:
-                self.pc = correct_pc
-                # en el siguiente ciclo, vamos a flush
-                self.flush_next = True
+        # --- I-type LW ---
+        elif typ == 'I_LW':
+            alu_result = a + de['imm']
 
-            res = None
+        # --- S-type SW ---
+        elif typ == 'S_SW':
+            alu_result = a + de['imm']
 
+        # --- B-type BEQ/BNE ---
+        elif typ == 'B':
+            if   op == self.OPCODES['BEQ']: branch_taken = (a == b)
+            elif op == self.OPCODES['BNE']: branch_taken = (a != b)
+            target_pc = self.pc + de['imm']
 
-        elif de['type'] == 'J':
-            self.pc += de['imm']
-            res = None
+        # --- J-type JUMP ---
+        elif typ == 'J':
+            branch_taken = True
+            target_pc    = self.pc + de['imm']
 
-        # guardamos en ex_mem
+        # --- U-type LUI/AUIPC ---
+        elif typ == 'U':
+            if op == self.OPCODES['LUI']:
+                alu_result = de['imm']
+            else:  # AUIPC
+                alu_result = self.pc + de['imm']
+
+        else:
+            raise ValueError(f"Tipo desconocido en EX: {typ}")
+
+        print(f"[Cycle {self.cycle_count}] EX: alu_result = {alu_result}")
+
+        # Preparo el latch EX/MEM
         self.ex_mem = {
-            'type':       de['type'],
-            'opcode':     op,
-            'rd':         de.get('rd'),
-            'rt':         de.get('rt'),
-            'alu_result': res,
-            'mem_data':   None
+            'type'       : typ,
+            'opcode'     : op,
+            'alu_result' : alu_result,
+            'rd'         : de.get('rd'),
+            'rt'         : de.get('rt'),
+            'rs1'        : de.get('rs1'),
+            'rs2'        : de.get('rs2'),
+            'imm'        : de.get('imm')
         }
-        print(f"[Cycle {self.cycle_count}] EX: alu_result = {res}")
 
-        # Preparamos latch EX/MEM
-        self.ex_mem = {
-            'type':       de['type'],
-            'opcode':     op,
-            'rd':         de.get('rd'),
-            'rt':         de.get('rt'),
-            'alu_result': res,
-            'mem_data':   None
-        }
-        print(f"[Cycle {self.cycle_count}] EX: alu_result = {res}")
+        # Control hazard: en B o J hago flush y actualizo PC
+        if typ in ('B', 'J'):
+            print("Flush inserted (control hazard)")
+            self.fetch_decode   = None
+            self.decode_execute = None
+            # si no se tomó, avanzo secuencial; si sí, al target
+            self.pc = target_pc if branch_taken else (self.pc + 4)
+        else:
+            # PC normal avanza 4 bytes
+            self.pc += 4
 
     def memory_access(self):
+        """
+        Etapa MEM:
+        - Para loads: lee de la memoria
+        - Para stores: escribe en la memoria
+        - Prepara el latch mem_wb para la etapa WB
+        """
         self.current_stage = 'MEM'
+
+        # Si no hay nada que procesar (burbuja), propagamos None
+        if self.ex_mem is None or 'type' not in self.ex_mem or 'alu_result' not in self.ex_mem:
+            self.mem_wb = None
+            return
+
         mem = self.ex_mem
+        alu = mem['alu_result']
+        typ = mem['type']
+        result = None
 
-        if mem['type'] == 'I_LW':
-            addr = mem['alu_result']
-            idx  = addr // 4
-            data = self.memory.load(idx) if 0 <= idx < len(self.memory.memory) else 0
-            mem['mem_data'] = data
-            print(f"[Cycle {self.cycle_count}] MEM: loaded {data} from addr {addr}")
+        # I-type load
+        if typ == 'I_LW':
+            result = self.memory.load(alu // 4)
+            print(f"[Cycle {self.cycle_count}] MEM: loaded {result} from addr {alu}")
 
-        elif mem['type'] == 'S_SW':
-            addr = mem['alu_result']
-            idx  = addr // 4
-            val  = self.registers.read(mem['rt'])
-            if 0 <= idx < len(self.memory.memory):
-                self.memory.store(idx, val)
-            print(f"[Cycle {self.cycle_count}] MEM: stored {val} at addr {addr}")
+        # S-type store
+        elif typ == 'S_SW':
+            value = self.registers.read(mem['rt'])
+            self.memory.store(alu // 4, value)
+            print(f"[Cycle {self.cycle_count}] MEM: stored {value} at addr {alu}")
 
-        self.mem_wb = mem.copy()
+        # Otros tipos no acceden a memoria
+        else:
+            result = alu  # propagamos el resultado del ALU
+
+        # Preparo EX/MEM → MEM/WB
+        self.mem_wb = {
+            'type'       : typ,
+            'opcode'     : mem.get('opcode'),
+            'alu_result' : alu,
+            'load_data'  : result,
+            'rd'         : mem.get('rd'),
+            'rt'         : mem.get('rt')
+        }
+
+
 
     def writeback(self):
+        """
+        Etapa WB:
+         - Para R- y U-types: escribe alu_result en rd
+         - Para I_LW: escribe load_data en rt
+         - Ignora stores y branches
+        """
         self.current_stage = 'WB'
+
         wb = self.mem_wb
+        if wb is None or 'type' not in wb:
+            return  
 
-        # R-type & U-type
-        if wb['type'] in ('R', 'U') and wb.get('rd') is not None:
-            self.registers.write(wb['rd'], wb['alu_result'])
-            print(f"[Cycle {self.cycle_count}] WB: wrote {wb['alu_result']} to x{wb['rd']}")
+        typ = wb['type']
+
+        # R-type y U-type
+        if typ in ('R', 'U'):
+            rd = wb.get('rd')
+            if rd is not None:
+                value = wb.get('alu_result', 0)
+                self.registers.write(rd, value)
+                print(f"[Cycle {self.cycle_count}] WB: wrote {value} to x{rd}")
+                self.instr_retired += 1
+
+        # I-type load
+        elif typ == 'I_LW':
+            rt = wb.get('rt')
+            if rt is not None:
+                value = wb.get('load_data', 0)
+                self.registers.write(rt, value)
+                print(f"[Cycle {self.cycle_count}] WB: wrote {value} to x{rt}")
+                self.instr_retired += 1
+
+        # Para stores y branches no hay writeback, pero sí contamos retire de la instrucción
+        elif typ in ('S_SW', 'B', 'J'):
+            # Solo las branch/jump no incrementan instr_retired aquí,
+            # asumimos que el retire ocurre en EX para branches/jumps
+            if typ == 'S_SW':
+                self.instr_retired += 1
+
+        # Incrementar retiros si la instrucción no entró en ninguno de los casos anteriores
+        else:
+            # Por seguridad, contamos un retire genérico
             self.instr_retired += 1
 
-        # I-type LW
-        elif wb['type'] == 'I_LW' and wb.get('rt') is not None:
-            self.registers.write(wb['rt'], wb['mem_data'])
-            print(f"[Cycle {self.cycle_count}] WB: wrote {wb['mem_data']} to x{wb['rt']}")
-            self.instr_retired += 1
-
-        # No writeback para SW, B, J
 
     @staticmethod
     def _sign_extend(bitstr: str, bits: int) -> int:

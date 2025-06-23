@@ -2,71 +2,68 @@
 
 class Assembler:
     """
-    Convierte instrucciones RISCV (R, I, S, B, U, J) a su formato binario de 32 bits,
+    Convierte instrucciones RISCV (R, I, S, B, U, J y EBREAK) a su formato binario de 32 bits,
     y permite desensamblar de vuelta a texto.
     """
 
     def __init__(self):
         # Opcode de 6 bits para cada instrucción
         self.opcodes = {
-            'ADD':   0b000000,
-            'SUB':   0b000001,
-            'AND':   0b000110,
-            'OR':    0b000111,
-            'XOR':   0b001000,
-            'SLL':   0b001001,
-            'SRL':   0b001010,
-            'SLT':   0b001011,
-            'LW':    0b000010,
-            'SW':    0b000011,
-            'BEQ':   0b000101,
-            'BNE':   0b001100,
-            'JUMP':  0b000100,
-            'LUI':   0b001101,
-            'AUIPC': 0b001110,
-            # Alias
-            'LOAD':  0b000010,
-            'STORE': 0b000011,
+            'ADD':    0b000000,
+            'SUB':    0b000001,
+            'MUL':    0b000010,   # soporte MUL
+            'AND':    0b000110,
+            'OR':     0b000111,
+            'XOR':    0b001000,
+            'SLL':    0b001001,
+            'SRL':    0b001010,
+            'SLT':    0b001011,
+            'LW':     0b000100,
+            'SW':     0b000101,
+            'BEQ':    0b000110,
+            'BNE':    0b000111,
+            'JUMP':   0b001000,
+            'LUI':    0b001001,
+            'AUIPC':  0b001010,
+            'EBREAK': 0b000000,   # lo tratamos como un NOP (all zeros)
         }
 
-        # Para desensamblar: mapeo inverso, omitiendo alias
-        self.rev_opcodes = {
-            0b000000: 'ADD',
-            0b000001: 'SUB',
-            0b000110: 'AND',
-            0b000111: 'OR',
-            0b001000: 'XOR',
-            0b001001: 'SLL',
-            0b001010: 'SRL',
-            0b001011: 'SLT',
-            0b000010: 'LW',
-            0b000011: 'SW',
-            0b000101: 'BEQ',
-            0b001100: 'BNE',
-            0b000100: 'JUMP',
-            0b001101: 'LUI',
-            0b001110: 'AUIPC',
+        # Para desensamblar: inverso (omitimos aliases aquí)
+        self.rev_opcodes = {v: k for k, v in self.opcodes.items()}
+
+        # Alias que acepta tu .txt
+        self.aliases = {
+            'LOAD':     'LW',
+            'STORE':    'SW',
+            'MULTIPLY': 'MUL',
+            'BRANCH_EQ': 'BEQ',
+            'END':      'EBREAK',
         }
 
     def assemble(self, instr: str) -> str:
         """
         Ensambla una instrucción RISCV de texto a su código binario de 32 bits.
+        Líneas vacías o 'end' generan un NOP (32 ceros).
         """
         parts = instr.replace(',', ' ').split()
+        if not parts:
+            # NOP
+            return "0" * 32
+
         op = parts[0].upper()
-        # Normalizar alias
-        if op == 'LOAD':  op = 'LW'
-        if op == 'STORE': op = 'SW'
+        # normaliza alias
+        op = self.aliases.get(op, op)
 
         if op not in self.opcodes:
             raise ValueError(f"Instrucción desconocida: {op}")
+
         code = self.opcodes[op]
 
         def reg(x: str) -> int:
             return int(x[1:])
 
         # R-type: opcode(6) rd(5) rs1(5) rs2(5) padding(11)
-        if op in ('ADD','SUB','AND','OR','XOR','SLL','SRL','SLT'):
+        if op in ('ADD','SUB','MUL','AND','OR','XOR','SLL','SRL','SLT'):
             rd, rs1, rs2 = reg(parts[1]), reg(parts[2]), reg(parts[3])
             return (
                 f"{code:06b}"
@@ -80,7 +77,6 @@ class Assembler:
             imm_str, base_str = parts[2].split('(')
             imm  = int(imm_str)
             base = reg(base_str[:-1])
-            # immediate de 16 bits
             imm16 = imm & 0xFFFF
             return (
                 f"{code:06b}"
@@ -128,6 +124,11 @@ class Assembler:
                 f"{imm20:020b}"
             )
 
+        # EBREAK / END → tratamos como NOP
+        if op == 'EBREAK':
+            return "0" * 32
+
+        # Nunca debería llegar aquí
         raise NotImplementedError(f"Formato no implementado: {op}")
 
     def disassemble(self, binary: str) -> str:
@@ -143,7 +144,7 @@ class Assembler:
             raise ValueError(f"Opcode desconocido: {opc:06b}")
 
         # R-type
-        if op in ('ADD','SUB','AND','OR','XOR','SLL','SRL','SLT'):
+        if op in ('ADD','SUB','MUL','AND','OR','XOR','SLL','SRL','SLT'):
             rd  = int(binary[6:11], 2)
             rs1 = int(binary[11:16], 2)
             rs2 = int(binary[16:21], 2)
@@ -181,8 +182,12 @@ class Assembler:
         # U-type
         if op in ('LUI','AUIPC'):
             rd  = int(binary[6:11], 2)
-            imm = int(binary[11:], 2)  # ya lleva shift implícito
+            imm = int(binary[11:], 2)
             return f"{op} x{rd}, {imm}"
+
+        # EBREAK
+        if op == 'EBREAK':
+            return "EBREAK"
 
         raise NotImplementedError(f"Disassembly no implementado para: {op}")
 
@@ -192,6 +197,5 @@ class Assembler:
         Sign-extends a twos-complement bitstring `bits` of length `width`.
         """
         if bits[0] == '1':
-            # negativo
             return int(bits, 2) - (1 << width)
         return int(bits, 2)

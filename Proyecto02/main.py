@@ -5,7 +5,7 @@ from core.registers import Registers
 from core.memory import Memory
 from ui.pipeline_view import PipelineView
 
-# Latencias por etapa en nanosegundos
+# Latencias por etapa en picosegundos (ps)
 TIME_PER_STAGE_PS = {
     'IF': 200,
     'ID': 150,
@@ -20,13 +20,14 @@ def load_program(memory: Memory,
                  base_addr: int = 0,
                  pipeline: Pipeline = None):
     """
-    Ensambla y carga una lista de instrucciones en memoria (4 B por instrucción),
-    y, si se pasa el pipeline, marca pipeline.program_end.
+    Ensambla y carga una lista de instrucciones en memoria (4 B por instrucción).
+    Si se pasa `pipeline`, también marca pipeline.program_end.
     """
     addr = base_addr
     for instr in program:
         binstr = assembler.assemble(instr)
         word   = int(binstr, 2)
+        # guardamos en palabras (word-aligned)
         memory.store(addr // 4, word)
         addr += 4
     if pipeline:
@@ -36,7 +37,9 @@ def print_state(pipeline: Pipeline,
                 regs: Registers,
                 mem: Memory,
                 mem_range: range = range(0, 16, 4)):
-    """Muestra PC, registros x0–x7 y un vistazo a memoria."""
+    """
+    Muestra por consola PC, registros x0–x7 y un vistazo a memoria.
+    """
     print(f"  PC = {pipeline.pc}")
     print("  Registros:", [regs.read(i) for i in range(8)])
     print("  Memoria:")
@@ -48,8 +51,8 @@ def simulation_mode(pipeline: Pipeline,
                     regs: Registers,
                     mem: Memory,
                     max_cycles: int = 10,
-                    delay: float = 1.0):
-    """Ejecuta el pipeline por max_cycles ciclos, con retardo."""
+                    delay: float    = 1.0):
+    """Ejecuta el pipeline durante `max_cycles` ciclos, con retardo."""
     for cycle in range(1, max_cycles + 1):
         print(f"=== Ciclo {cycle} ===")
         pipeline.execute_stage()
@@ -59,7 +62,7 @@ def simulation_mode(pipeline: Pipeline,
 def step_by_step_mode(pipeline: Pipeline,
                       regs: Registers,
                       mem: Memory):
-    """Permite avanzar ciclo a ciclo con Enter."""
+    """Permite avanzar un ciclo al pulsar Enter."""
     cycle = 0
     while True:
         cmd = input("Pulse Enter para un ciclo (o 'q' para salir): ").strip().lower()
@@ -74,7 +77,7 @@ def run_to_end_mode(pipeline: Pipeline,
                     regs: Registers,
                     mem: Memory,
                     max_cycles: int = 1000):
-    """Corre hasta pipeline.program_end o max_cycles."""
+    """Ejecuta hasta llegar a pipeline.program_end o `max_cycles`."""
     for cycle in range(1, max_cycles + 1):
         if hasattr(pipeline, 'program_end') and pipeline.pc >= pipeline.program_end:
             print("=== Fin de programa alcanzado ===")
@@ -84,13 +87,15 @@ def run_to_end_mode(pipeline: Pipeline,
         print_state(pipeline, regs, mem)
 
 def record_stats(pipeline: Pipeline):
-    """Calcula tiempo simulado y registra la corrida en pipeline.stats."""
-    cycles     = pipeline.cycle_count
-    instrs     = getattr(pipeline, 'instr_retired', 0)
-    # Tiempo en ps
-    total_ps   = cycles * sum(TIME_PER_STAGE_PS.values())
-    # Convertimos a ns para la tabla
-    total_ns   = total_ps / 1000.0
+    """
+    Calcula el tiempo simulado (en ns) y registra la ejecución en pipeline.stats.
+    """
+    cycles = pipeline.cycle_count
+    instrs = getattr(pipeline, 'instr_retired', 0)
+    # Tiempo total en picosegundos
+    total_ps = cycles * sum(TIME_PER_STAGE_PS.values())
+    # Convertir a nanosegundos para mostrar
+    total_ns = total_ps / 1000.0
     pipeline.stats.add_run(
         cycles=cycles,
         instr_count=instrs,
@@ -99,20 +104,16 @@ def record_stats(pipeline: Pipeline):
     )
 
 def main():
-
-
-        # 1) Inicialización
+    # 1) Inicialización de componentes
     assembler = Assembler()
     regs      = Registers()
     mem       = Memory(size=1024)
     pipeline  = Pipeline()
-
-    # Asegurarnos de que el pipeline use nuestras instancias
+    # Ligamos registros y memoria al pipeline
     pipeline.registers = regs
     pipeline.memory    = mem
 
-
-    # 2) Programa de prueba (puedes reemplazarlo tras pulsar "Cargar Programa")
+    # 2) Programa de prueba (puedes reemplazarlo pulsando "Cargar Programa" en la GUI)
     program = [
         "LUI x1, 1000",
         "AUIPC x2, 2000",
@@ -131,10 +132,10 @@ def main():
         "JUMP 16"
     ]
 
-    # 3) Cargar programa y marcar fin
+    # 3) Cargamos el programa en memoria y marcamos fin
     load_program(mem, assembler, program, base_addr=0, pipeline=pipeline)
 
-    # 4) Menú de modos de ejecución
+    # 4) Menú de modos de ejecución en consola
     print("\nBienvenido a la simulación del procesador")
     print("1: Simulación automática (10 ciclos)")
     print("2: Ejecución paso a paso")
@@ -143,24 +144,24 @@ def main():
     mode = input("Seleccione modo (1/2/3/4): ").strip()
 
     if mode == '1':
-        simulation_mode(pipeline, regs, mem, max_cycles=10, delay=1.0)
+        simulation_mode(pipeline, regs, mem)
     elif mode == '2':
         step_by_step_mode(pipeline, regs, mem)
     elif mode == '3':
-        run_to_end_mode(pipeline, regs, mem, max_cycles=1000)
+        run_to_end_mode(pipeline, regs, mem)
     elif mode == '4':
-        # Levanta la GUI con carga dinámica y flushing visual
-        view = PipelineView(pipeline, regs, mem)
+        # Lanzamos la GUI pasando nuestra instancia real de Pipeline
+        view = PipelineView()
         view.mainloop()
+        return
     else:
         print("Opción no válida. Saliendo.")
         return
 
-    # 5) Registrar y mostrar métricas
+    # 5) Después de la simulación en consola, registramos y mostramos estadísticas
     record_stats(pipeline)
     print("\n=== Estadísticas de ejecuciones recientes ===")
     pipeline.stats.display()
-
 
 if __name__ == "__main__":
     main()
