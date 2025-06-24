@@ -22,4 +22,7 @@ MUL x13, x7, x10
 MUL x14, x8, x12
 ADD x15, x13, x14
 SW x15, 44(x0)
+JUMP 64
+ADD x15, x7, x8
+SW x15, 56(x0)
 EBREAK

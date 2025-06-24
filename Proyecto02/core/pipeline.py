@@ -21,12 +21,12 @@ class Pipeline:
         'BNE':   0b001100,
         'JUMP':  0b000100,
         'LUI':   0b001101,
-        'AUIPC': 0b001110
+        'AUIPC': 0b001110,
+        'MUL':   0b001111,
+        'EBREAK':0b111111   
     }
 
-    def __init__(self,
-                 hazard_unit: bool = False,
-                 branch_pred: bool = False):
+    def __init__(self, hazard_unit: bool = False, branch_pred: bool = False):
         # Latches del pipeline
         self.fetch_decode   = None
         self.decode_execute = None
@@ -126,6 +126,8 @@ class Pipeline:
 
         # Empezamos construyendo el nuevo paquete de ID/EX
         instr = None
+        de = {}  # Inicializamos 'de' como un diccionario vacío
+
         # R-type
         if opcode in (
             self.OPCODES['ADD'], self.OPCODES['SUB'],
@@ -136,53 +138,65 @@ class Pipeline:
             rd  = int(raw[6:11], 2)
             rs1 = int(raw[11:16], 2)
             rs2 = int(raw[16:21], 2)
-            instr = {'type':'R','opcode':opcode,'rd':rd,'rs1':rs1,'rs2':rs2}
+            instr = {'type': 'R', 'opcode': opcode, 'rd': rd, 'rs1': rs1, 'rs2': rs2}
+            de = instr  # Guardamos el diccionario en 'de'
 
         # I-type LW
         elif opcode == self.OPCODES['LW']:
             rt  = int(raw[6:11], 2)
             rs1 = int(raw[11:16], 2)
             imm = self._sign_extend(raw[16:], 16)
-            instr = {'type':'I_LW','opcode':opcode,'rt':rt,'rs1':rs1,'imm':imm}
+            instr = {'type': 'I_LW', 'opcode': opcode, 'rt': rt, 'rs1': rs1, 'imm': imm}
+            de = instr  # Guardamos el diccionario en 'de'
 
         # S-type SW
         elif opcode == self.OPCODES['SW']:
             hi5    = int(raw[6:11], 2)
             rs1    = int(raw[11:16], 2)
             rt     = int(raw[16:21], 2)
-            lo11   = int(raw[21:],    2)
+            lo11   = int(raw[21:], 2)
             imm    = self._sign_extend(f"{hi5:05b}{lo11:011b}", 16)
-            instr = {'type':'S_SW','opcode':opcode,'rt':rt,'rs1':rs1,'imm':imm}
+            instr = {'type': 'S_SW', 'opcode': opcode, 'rt': rt, 'rs1': rs1, 'imm': imm}
+            de = instr  # Guardamos el diccionario en 'de'
 
         # B-type BEQ/BNE
         elif opcode in (self.OPCODES['BEQ'], self.OPCODES['BNE']):
             rs1 = int(raw[6:11], 2)
-            rs2 = int(raw[11:16],2)
+            rs2 = int(raw[11:16], 2)
             imm = self._sign_extend(raw[16:], 16)
-            instr = {'type':'B','opcode':opcode,'rs1':rs1,'rs2':rs2,'imm':imm}
+            instr = {'type': 'B', 'opcode': opcode, 'rs1': rs1, 'rs2': rs2, 'imm': imm}
+            de = instr  # Guardamos el diccionario en 'de'
 
         # J-type JUMP
         elif opcode == self.OPCODES['JUMP']:
-            imm = self._sign_extend(raw[6:], 26)
-            instr = {'type':'J','opcode':opcode,'imm':imm}
+            imm = self._sign_extend(raw[6:], 26) * 4
+            instr = {'type': 'J', 'opcode': opcode, 'imm': imm}
+            de = instr  # Guardamos el diccionario en 'de'
 
         # U-type LUI/AUIPC
         elif opcode in (self.OPCODES['LUI'], self.OPCODES['AUIPC']):
             rd  = int(raw[6:11], 2)
             imm = int(raw[11:], 2) << 11
-            instr = {'type':'U','opcode':opcode,'rd':rd,'imm':imm}
+            instr = {'type': 'U', 'opcode': opcode, 'rd': rd, 'imm': imm}
+            de = instr  # Guardamos el diccionario en 'de'
+
+        # --- Manejo de EBREAK ---
+        elif opcode == self.OPCODES['EBREAK']:
+            print(f"[Cycle {self.cycle_count}] EBREAK: ejecución detenida")
+            self.pc = None  # Detenemos la ejecución
+            self.ex_mem = None  # Limpiamos el latch EX/MEM para evitar más operaciones
 
         else:
             raise ValueError(f"Opcode desconocido en ID: {opcode}")
 
         # Ya tenemos un diccionario válido
-        self.decode_execute = instr
+        self.decode_execute = de  # Aquí guardamos el diccionario final en self.decode_execute
 
         # Ahora, si hay unidad de hazards, aplicamos detección y forwarding
         if self.hazard_unit:
             # RAW detection → posible stall
             rd_ex = self.ex_mem.get('rd') if self.ex_mem else None
-            if instr['type']=='R' and (instr['rs1']==rd_ex or instr['rs2']==rd_ex):
+            if de['type'] == 'R' and (de['rs1'] == rd_ex or de['rs2'] == rd_ex):
                 print("  Data hazard → stall next cycle")
                 self.stall = True
             else:
@@ -199,12 +213,13 @@ class Pipeline:
 
         print(f"[Cycle {self.cycle_count}] ID: decoded {self.decode_execute}")
 
+
     def execute(self):
         """
         Etapa EX:
-         - Calcula el resultado del ALU
-         - Gestiona saltos/branch (control hazards → flush + PC)
-         - Llena el registro ex_mem para la etapa MEM
+        - Calcula el resultado del ALU
+        - Gestiona saltos/branch (control hazards → flush + PC)
+        - Llena el registro ex_mem para la etapa MEM
         """
         self.current_stage = 'EX'
 
@@ -213,28 +228,29 @@ class Pipeline:
             self.ex_mem = None
             return
 
-        de   = self.decode_execute
-        op   = de['opcode']
-        typ  = de['type']
+        de = self.decode_execute
+        op = de['opcode']
+        typ = de['type']
 
         # Leer operandos (si ya fueron forwardeados, vienen en val1/val2)
         a = de.get('val1', self.registers.read(de.get('rs1', 0)))
         b = de.get('val2', self.registers.read(de.get('rs2', 0)))
 
-        alu_result   = None
+        alu_result = None
         branch_taken = False
-        target_pc    = None
+        target_pc = None
 
         # --- R-type ---
         if typ == 'R':
-            if   op == self.OPCODES['ADD']: alu_result = a + b
+            if op == self.OPCODES['ADD']: alu_result = a + b
             elif op == self.OPCODES['SUB']: alu_result = a - b
             elif op == self.OPCODES['AND']: alu_result = a & b
-            elif op == self.OPCODES['OR' ]: alu_result = a | b
+            elif op == self.OPCODES['OR']: alu_result = a | b
             elif op == self.OPCODES['XOR']: alu_result = a ^ b
             elif op == self.OPCODES['SLL']: alu_result = (a << (b & 0x1F)) & 0xFFFFFFFF
-            elif op == self.OPCODES['SRL']: alu_result = (a % (1<<32)) >> (b & 0x1F)
+            elif op == self.OPCODES['SRL']: alu_result = (a % (1 << 32)) >> (b & 0x1F)
             elif op == self.OPCODES['SLT']: alu_result = 1 if a < b else 0
+            elif op == self.OPCODES['MUL']: alu_result = a * b  # Multiplicación
 
         # --- I-type LW ---
         elif typ == 'I_LW':
@@ -246,14 +262,15 @@ class Pipeline:
 
         # --- B-type BEQ/BNE ---
         elif typ == 'B':
-            if   op == self.OPCODES['BEQ']: branch_taken = (a == b)
+            if op == self.OPCODES['BEQ']: branch_taken = (a == b)
             elif op == self.OPCODES['BNE']: branch_taken = (a != b)
             target_pc = self.pc + de['imm']
 
         # --- J-type JUMP ---
         elif typ == 'J':
             branch_taken = True
-            target_pc    = self.pc + de['imm']
+            imm = self._sign_extend(de['imm'], 26)  # Extiende el valor de 26 bits a 32 bits
+            target_pc = self.pc + (imm * 4)  # Multiplica por 4 para obtener el desplazamiento en palabras
 
         # --- U-type LUI/AUIPC ---
         elif typ == 'U':
@@ -269,26 +286,29 @@ class Pipeline:
 
         # Preparo el latch EX/MEM
         self.ex_mem = {
-            'type'       : typ,
-            'opcode'     : op,
-            'alu_result' : alu_result,
-            'rd'         : de.get('rd'),
-            'rt'         : de.get('rt'),
-            'rs1'        : de.get('rs1'),
-            'rs2'        : de.get('rs2'),
-            'imm'        : de.get('imm')
+            'type': typ,
+            'opcode': op,
+            'alu_result': alu_result,
+            'rd': de.get('rd'),
+            'rt': de.get('rt'),
+            'rs1': de.get('rs1'),
+            'rs2': de.get('rs2'),
+            'imm': de.get('imm')
         }
 
-        # Control hazard: en B o J hago flush y actualizo PC
+        # Si encontramos un salto o rama, realizamos un flush y actualizamos el PC
         if typ in ('B', 'J'):
             print("Flush inserted (control hazard)")
-            self.fetch_decode   = None
+            self.fetch_decode = None
             self.decode_execute = None
-            # si no se tomó, avanzo secuencial; si sí, al target
+            # Si la rama se toma, actualizamos el PC al target, si no, avanzamos secuencialmente
             self.pc = target_pc if branch_taken else (self.pc + 4)
+
         else:
             # PC normal avanza 4 bytes
             self.pc += 4
+
+
 
     def memory_access(self):
         """
@@ -326,22 +346,21 @@ class Pipeline:
 
         # Preparo EX/MEM → MEM/WB
         self.mem_wb = {
-            'type'       : typ,
-            'opcode'     : mem.get('opcode'),
-            'alu_result' : alu,
-            'load_data'  : result,
-            'rd'         : mem.get('rd'),
-            'rt'         : mem.get('rt')
+            'type': typ,
+            'opcode': mem.get('opcode'),
+            'alu_result': alu,
+            'load_data': result,
+            'rd': mem.get('rd'),
+            'rt': mem.get('rt')
         }
-
 
 
     def writeback(self):
         """
         Etapa WB:
-         - Para R- y U-types: escribe alu_result en rd
-         - Para I_LW: escribe load_data en rt
-         - Ignora stores y branches
+        - Para R- y U-types: escribe alu_result en rd
+        - Para I_LW: escribe load_data en rt
+        - Ignora stores y branches
         """
         self.current_stage = 'WB'
 
@@ -352,22 +371,16 @@ class Pipeline:
         typ = wb['type']
 
         # R-type y U-type
-        if typ in ('R', 'U'):
-            rd = wb.get('rd')
-            if rd is not None:
-                value = wb.get('alu_result', 0)
-                self.registers.write(rd, value)
-                print(f"[Cycle {self.cycle_count}] WB: wrote {value} to x{rd}")
-                self.instr_retired += 1
+        if typ in ('R', 'U') and wb.get('rd') is not None:
+            self.registers.write(wb['rd'], wb['alu_result'])
+            print(f"[Cycle {self.cycle_count}] WB: wrote {wb['alu_result']} to x{wb['rd']}")
+            self.instr_retired += 1
 
         # I-type load
-        elif typ == 'I_LW':
-            rt = wb.get('rt')
-            if rt is not None:
-                value = wb.get('load_data', 0)
-                self.registers.write(rt, value)
-                print(f"[Cycle {self.cycle_count}] WB: wrote {value} to x{rt}")
-                self.instr_retired += 1
+        elif typ == 'I_LW' and wb.get('rt') is not None:
+            self.registers.write(wb['rt'], wb['load_data'])
+            print(f"[Cycle {self.cycle_count}] WB: wrote {wb['load_data']} to x{wb['rt']}")
+            self.instr_retired += 1
 
         # Para stores y branches no hay writeback, pero sí contamos retire de la instrucción
         elif typ in ('S_SW', 'B', 'J'):
@@ -381,11 +394,28 @@ class Pipeline:
             # Por seguridad, contamos un retire genérico
             self.instr_retired += 1
 
-
     @staticmethod
-    def _sign_extend(bitstr: str, bits: int) -> int:
-        """Sign-extend a bitstring of length `bits` to a Python int."""
+    def _sign_extend(bitstr, bits: int) -> int:
+        """Extiende un valor binario de longitud `bits` a un valor con signo."""
+        # Si 'bitstr' no es una cadena, lo convertimos a una cadena binaria
+        if isinstance(bitstr, int):
+            bitstr = format(bitstr, f'{bits}b')  # Convertir el valor entero a una cadena binaria de 'bits' longitud
+
+        # Asegurarse de que 'bitstr' sea una cadena
+        if not isinstance(bitstr, str):
+            raise TypeError(f"Expected 'bitstr' to be a string, got {type(bitstr)}")
+
+        # Convierte la cadena binaria a un número entero
         val = int(bitstr, 2)
+
+        # Si el bit más significativo es 1 (signo negativo), se extiende
         if bitstr[0] == '1':
-            val -= (1 << bits)
+            val -= (1 << bits)  # Extiende a negativo
+
         return val
+
+
+
+
+
+

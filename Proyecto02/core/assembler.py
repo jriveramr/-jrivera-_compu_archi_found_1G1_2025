@@ -25,7 +25,8 @@ class Assembler:
             'JUMP':   0b001000,
             'LUI':    0b001001,
             'AUIPC':  0b001010,
-            'EBREAK': 0b000000,   # lo tratamos como un NOP (all zeros)
+            'MUL':   0b001111, 
+            'EBREAK': 0b111111,   # lo tratamos como un NOP (all zeros)
         }
 
         # Para desensamblar: inverso (omitimos aliases aquí)
